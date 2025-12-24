@@ -4,7 +4,7 @@ import os
 
 load_dotenv()
 
-POSTGRES_DSN = os.getenv("POSTGRES_DSN", "postgresql://user:password@localhost:5432/rag_poc")
+POSTGRES_DSN = os.getenv("POSTGRES_DSN", "postgresql+psycopg://rag_user:changeme@localhost:5432/rag_poc")
 PDF_STORAGE_PATH = Path(os.getenv("PDF_STORAGE_PATH", "./data/pdfs")).expanduser()
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
