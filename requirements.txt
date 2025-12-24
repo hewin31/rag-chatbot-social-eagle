@@ -5,3 +5,8 @@ psycopg2-binary==2.9.7
 pydantic==1.10.7
 click==8.1.7
 python-dotenv==1.0.0
+openai==1.8.2
+faiss-cpu==1.7.4
+sentence-transformers==2.2.2
+numpy==1.26.5
+# end
