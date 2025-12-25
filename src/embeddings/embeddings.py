@@ -15,13 +15,15 @@ from src.db.models import Chunk, Embedding
 # optional imports
 try:
     import openai
-except Exception:
+except ImportError:
     openai = None
 
 try:
     from sentence_transformers import SentenceTransformer
-except Exception:
+    _has_sentence_transformers = True
+except ImportError:
     SentenceTransformer = None
+    _has_sentence_transformers = False
 
 EMBEDDINGS_DIR = Path("data/embeddings")
 EMBEDDINGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -64,7 +66,7 @@ def get_embedding_model(name: str = "sentence-transformers/all-MiniLM-L6-v2"):
         return _openai_embed
 
     # fallback to sentence-transformers
-    if SentenceTransformer is None:
+    if not _has_sentence_transformers:
         raise RuntimeError("sentence-transformers not installed")
     model = SentenceTransformer(name)
 
