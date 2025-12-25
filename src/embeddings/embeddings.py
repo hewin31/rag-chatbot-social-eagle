@@ -9,7 +9,7 @@ import faiss
 
 from sqlalchemy.orm import Session
 
-from src.db import get_session
+from src.db.session import get_session
 from src.db.models import Chunk, Embedding
 
 # optional imports
