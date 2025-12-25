@@ -116,3 +116,18 @@ class Relationship(Base):
     
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+
+
+class QueryLog(Base):
+    """Retrieval Layer: Logs user queries and retrieved context for provenance."""
+    __tablename__ = "query_logs"
+    
+    query_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    query_text = Column(Text, nullable=False)
+    query_type = Column(String, nullable=True) # e.g., "semantic", "relational"
+    
+    retrieved_chunk_ids = Column(JSON, nullable=True) 
+    retrieved_graph_data = Column(JSON, nullable=True)
+    
+    execution_time_ms = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
