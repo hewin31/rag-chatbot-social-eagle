@@ -25,6 +25,69 @@ except OSError:
     download("en_core_web_sm")
     nlp = spacy.load("en_core_web_sm")
 
+# --- CONFIGURATION: Domain Dictionary ---
+ENTITY_CONFIG = {
+    "ORG": ["company", "organization", "bank", "institution", "fund", "branch", "location", "goldman sachs", "icici bank"],
+    "SECURITY": ["stock", "security", "share", "bond", "etf", "treasury", "equity", "instrument", "option", "future", "derivative", "asset", "aapl", "nifty"],
+    "CURRENCY": ["currency", "dollar", "rupee", "euro", "usd", "inr", "eur"],
+    "ACCOUNT": ["account", "savings", "brokerage"],
+    "TRANSACTION": ["transaction", "wire", "transfer", "payment", "deposit", "withdrawal"],
+    "FINANCIAL_METRIC": ["revenue", "expense", "cost", "profit", "loss", "income"],
+    "TAX": ["tax", "fee", "charge", "gst", "deduction", "exemption", "refund", "assessment", "return", "filing"],
+    "DEBT": ["loan", "debt", "borrowing", "mortgage", "interest", "credit"],
+    "PAYMENT_METHOD": ["card", "neft", "cheque"],
+    "CONTRACT": ["contract", "agreement", "policy", "insurance"],
+    "RATING": ["rating", "score"],
+    "RISK": ["risk", "market"],
+    "COMMODITY": ["commodity", "gold", "oil", "wheat"],
+    "INDEX": ["index", "sensex", "nifty"],
+    "REGULATION": ["compliance", "regulation", "audit", "act", "section", "penalty", "penalties"]
+}
+
+RELATIONSHIP_CONFIG = {
+    "own": "OWNS", "hold": "OWNS", "manage": "MANAGES", "operate": "MANAGES", "belong": "PART_OF", "part": "PART_OF",
+    "invest": "INVESTS_IN", "invest_in": "INVESTS_IN", "fund": "FUNDED_BY", "fund_by": "FUNDED_BY",
+    "owe": "OWES", "debtor": "DEBTOR_OF", "secure": "SECURED_BY", "secure_by": "SECURED_BY",
+    "transact": "TRANSACTED_WITH", "transact_with": "TRANSACTED_WITH", "pay": "PAYS", "receive": "RECEIVES",
+    "rate": "RATED_BY", "rate_by": "RATED_BY", "evaluate": "EVALUATED_BY", "accrue": "INCURRED", "incur": "INCURRED",
+    "generate": "GENERATES", "yield": "GENERATES", "convert": "CONVERTED_TO", "convert_to": "CONVERTED_TO",
+    "trade": "TRADED_ON", "trade_on": "TRADED_ON", "list": "LISTED_AT",
+    "subject": "SUBJECT_TO", "subject_to": "SUBJECT_TO", "comply": "COMPLIANT_WITH", "comply_with": "COMPLIANT_WITH",
+    "cover": "COVERED_BY", "cover_by": "COVERED_BY", "audit": "AUDITED_BY", "verify": "VERIFIED_BY"
+}
+
+# Add EntityRuler to enforce these terms
+if "entity_ruler" not in nlp.pipe_names:
+    ruler = nlp.add_pipe("entity_ruler", before="ner")
+    patterns = []
+    for label, terms in ENTITY_CONFIG.items():
+        for term in terms:
+            patterns.append({"label": label, "pattern": [{"LOWER": term.lower()}]})
+    ruler.add_patterns(patterns)
+
+def _normalize_entity_text(text: str, label: str) -> str:
+    """
+    Normalizes entity text to reduce duplicates (e.g., 'Tax' -> 'tax').
+    """
+    text = text.strip()
+    
+    # 1. Always lowercase domain concepts and common financial terms
+    concept_labels = {
+        "SECURITY", "CURRENCY", "ACCOUNT", "TRANSACTION", "FINANCIAL_METRIC", 
+        "TAX", "DEBT", "PAYMENT_METHOD", "CONTRACT", "RATING", "RISK", 
+        "COMMODITY", "INDEX", "REGULATION", "DOMAIN_CONCEPT"
+    }
+    
+    if label in concept_labels:
+        return text.lower()
+        
+    # 2. For ORG, lowercase only if it's a generic term
+    if label == "ORG" and text.lower() in ["company", "organization", "bank", "institution", "fund", "branch", "location"]:
+        return text.lower()
+        
+    # 3. Default: Return as-is (preserves 'India', 'Deloitte', etc.)
+    return text
+
 def spacy_extract(text: str) -> Dict[str, Any]:
     """
     Extracts entities and relationships using spaCy (Offline/Local).
@@ -39,48 +102,206 @@ def spacy_extract(text: str) -> Dict[str, Any]:
     entity_map = {} 
     
     # Filter for specific entity types relevant to a KG
-    valid_labels = {"PERSON", "ORG", "GPE", "PRODUCT", "EVENT", "WORK_OF_ART", "LOC", "FAC"}
+    valid_labels = {"PERSON", "ORG", "GPE", "PRODUCT", "EVENT", "WORK_OF_ART", "LOC", "FAC"}.union(ENTITY_CONFIG.keys())
     
     for ent in doc.ents:
         if ent.label_ in valid_labels:
-            ent_data = {"name": ent.text, "type": ent.label_}
+            norm_name = _normalize_entity_text(ent.text, ent.label_)
+            ent_data = {"name": norm_name, "type": ent.label_}
             entities.append(ent_data)
             # Map every token in the entity span to the entity data
             for token in ent:
                 entity_map[token.i] = ent_data
 
-    # 2. Extract Relationships (Rule-based Dependency Parsing)
-    # Heuristic: Subject -> Verb -> Object
+    # Helper to resolve conjunctions (e.g., "Alice and Bob")
+    def resolve_entities(token):
+        found = []
+        if token.i in entity_map:
+            found.append(entity_map[token.i])
+        for child in token.children:
+            if child.dep_ == "conj":
+                found.extend(resolve_entities(child))
+        return found
+
+    # 2. Extract Relationships (Enhanced Dependency Parsing)
     for token in doc:
-        # Look for main verbs
+        
+        # Case A: Verbs (Active & Passive)
         if token.pos_ == "VERB":
-            subj = None
-            obj = None
+            subjects = []
+            objects = []
+            rel_type = None
             
-            # Find Subject (nsubj: nominal subject, nsubjpass: passive nominal subject)
+            # Check for passive voice
+            is_passive = False
             for child in token.children:
-                if child.dep_ in ("nsubj", "nsubjpass"):
-                    subj = child
+                if child.dep_ == "auxpass":
+                    is_passive = True
                     break
             
-            # Find Object (dobj: direct object, pobj: object of preposition, attr: attribute)
-            for child in token.children:
-                if child.dep_ in ("dobj", "pobj", "attr"):
-                    obj = child
-                    break
-            
-            # Check if subject and object resolve to extracted entities
-            if subj and obj:
-                subj_ent = entity_map.get(subj.i)
-                obj_ent = entity_map.get(obj.i)
+            if is_passive:
+                # Passive: Target (nsubjpass) ... by Source (agent)
+                for child in token.children:
+                    if child.dep_ == "nsubjpass":
+                        objects.extend(resolve_entities(child))
+                    if child.dep_ == "agent":
+                        for grandchild in child.children:
+                            if grandchild.dep_ == "pobj":
+                                subjects.extend(resolve_entities(grandchild))
+            else:
+                # Active: Source (nsubj) ... Target (dobj/attr/prep)
+                for child in token.children:
+                    if child.dep_ == "nsubj":
+                        subjects.extend(resolve_entities(child))
                 
-                # Only create relationship if both ends are named entities and distinct
-                if subj_ent and obj_ent and subj_ent != obj_ent:
-                    relationships.append({
-                        "source": subj_ent["name"],
-                        "target": obj_ent["name"],
-                        "type": token.lemma_ # Use the lemma of the verb (e.g., "acquired")
-                    })
+                for child in token.children:
+                    if child.dep_ in ("dobj", "attr"):
+                        objects.extend(resolve_entities(child))
+                        # If direct object is an entity, use it
+                        found_objs = resolve_entities(child)
+                        if found_objs:
+                            objects.extend(found_objs)
+                        else:
+                            # If not, check its children (e.g. "revealed discrepancies in REVENUE")
+                            for grandchild in child.children:
+                                objects.extend(resolve_entities(grandchild))
+                    
+                    # Prepositional objects (e.g. "invests in X")
+                    if child.dep_ == "prep":
+                        for grandchild in child.children:
+                            if grandchild.dep_ == "pobj":
+                                # Check for compound verb in config (e.g. "invest_in")
+                                compound = f"{token.lemma_.lower()}_{child.text.lower()}"
+                                if compound in RELATIONSHIP_CONFIG:
+                                    rel_type = RELATIONSHIP_CONFIG[compound]
+                                    objects.extend(resolve_entities(grandchild))
+                                elif not objects: # Fallback
+                                    objects.extend(resolve_entities(grandchild))
+
+            # Determine Relationship Type
+            if not rel_type:
+                lemma = token.lemma_.lower()
+                rel_type = RELATIONSHIP_CONFIG.get(lemma)
+            
+            # Fallback for unknown verbs if we have both ends
+            if not rel_type and subjects and objects:
+                rel_type = lemma.upper()
+
+            if rel_type:
+                for src in subjects:
+                    for tgt in objects:
+                        if src != tgt:
+                            relationships.append({
+                                "source": src["name"],
+                                "target": tgt["name"],
+                                "type": rel_type
+                            })
+
+        # Case B: Possessives (Alice's account)
+        if token.dep_ == "poss":
+            owners = resolve_entities(token)
+            assets = resolve_entities(token.head)
+            for owner in owners:
+                for asset in assets:
+                    if owner != asset:
+                        relationships.append({
+                            "source": owner["name"],
+                            "target": asset["name"],
+                            "type": "OWNS"
+                        })
+
+        # Case C: Appositions (Alice, CEO of X)
+        if token.dep_ == "appos":
+            ents1 = resolve_entities(token.head)
+            ents2 = resolve_entities(token)
+            for e1 in ents1:
+                for e2 in ents2:
+                    if e1 != e2:
+                        relationships.append({
+                            "source": e2["name"],
+                            "target": e1["name"],
+                            "type": "IS_A"
+                        })
+
+        # Case D: Prepositional Noun Links (Compliance with Regulations)
+        if token.dep_ == "prep" and token.head.pos_ in ("NOUN", "PROPN"):
+            sources = resolve_entities(token.head)
+            targets = []
+            for child in token.children:
+                if child.dep_ == "pobj":
+                    targets.extend(resolve_entities(child))
+            
+            if sources and targets:
+                prep_text = token.text.lower()
+                # Check config for noun_prep (e.g. "compliance_with")
+                noun_lemma = token.head.lemma_.lower()
+                compound = f"{noun_lemma}_{prep_text}"
+                
+                rtype = RELATIONSHIP_CONFIG.get(compound)
+                
+                if not rtype:
+                    # Generic mapping
+                    if prep_text == "of": rtype = "PART_OF"
+                    elif prep_text == "in": rtype = "LOCATED_IN"
+                    elif prep_text == "with": rtype = "ASSOCIATED_WITH"
+                    elif prep_text == "for": rtype = "FOR"
+                    else: rtype = "RELATED_TO"
+                
+                for s in sources:
+                    for t in targets:
+                        if s != t:
+                            relationships.append({
+                                "source": s["name"],
+                                "target": t["name"],
+                                "type": rtype
+                            })
+        
+        # Case E: Compounds & Modifiers (e.g. "Apple stock", "High-risk loan")
+        if token.dep_ in ("compound", "amod", "nmod"):
+            head_ents = resolve_entities(token.head)
+            child_ents = resolve_entities(token)
+            for h in head_ents:
+                for c in child_ents:
+                    if h != c:
+                        relationships.append({
+                            "source": c["name"],
+                            "target": h["name"],
+                            "type": "MODIFIES"
+                        })
+
+    # 3. Strategy: Sentence Co-occurrence (High Recall Fallback)
+    # If entities appear in the same sentence but weren't linked by grammar, link them as RELATED_TO.
+    existing_pairs = set()
+    for r in relationships:
+        existing_pairs.add(tuple(sorted((r["source"], r["target"]))))
+
+    for sent in doc.sents:
+        sent_indices = set(range(sent.start, sent.end))
+        sent_ents = []
+        seen_names = set()
+        
+        for idx in sent_indices:
+            if idx in entity_map:
+                e = entity_map[idx]
+                if e["name"] not in seen_names:
+                    sent_ents.append(e)
+                    seen_names.add(e["name"])
+        
+        # Link all entities in this sentence if not already linked
+        if len(sent_ents) > 1:
+            for i in range(len(sent_ents)):
+                for j in range(i+1, len(sent_ents)):
+                    e1 = sent_ents[i]
+                    e2 = sent_ents[j]
+                    pair = tuple(sorted((e1["name"], e2["name"])))
+                    
+                    if pair not in existing_pairs:
+                        relationships.append({
+                            "source": e1["name"],
+                            "target": e2["name"],
+                            "type": "RELATED_TO"
+                        })
+                        existing_pairs.add(pair)
 
     return {
         "entities": entities,
@@ -118,6 +339,9 @@ def extract_and_store_graph(chunk_id: uuid.UUID):
             if not name:
                 continue
                 
+            if name in entity_name_to_id:
+                continue
+
             new_entity = Entity(
                 document_id=chunk.document_id,
                 chunk_id=chunk.chunk_id,
@@ -136,10 +360,16 @@ def extract_and_store_graph(chunk_id: uuid.UUID):
             
         # 4. Process Relationships
         rels_data = graph_data.get("relationships", [])
+        seen_rels = set()
         for rel in rels_data:
             src = rel.get("source")
             tgt = rel.get("target")
             rtype = rel.get("type", "related_to")
+            
+            rel_key = (src, tgt, rtype)
+            if rel_key in seen_rels:
+                continue
+            seen_rels.add(rel_key)
             
             src_id = entity_name_to_id.get(src)
             tgt_id = entity_name_to_id.get(tgt)

@@ -4,6 +4,7 @@ import time
 import uuid
 from typing import List, Dict, Any, Tuple
 from sqlalchemy import select, or_
+from collections import defaultdict
 import spacy
 
 from .session import get_session
@@ -202,34 +203,168 @@ class RetrievalEngine:
         if not query_entities:
             return {"entities": [], "relationships": []}, logs
             
-        found_entities = []
-        found_relationships = []
-        
+        # 1. Find all matching entities in DB
+        all_matches = []
         for ent_text in query_entities:
-            # Find this entity in our DB (fuzzy match)
             stmt = select(Entity).filter(Entity.entity_text.ilike(f"%{ent_text}%"))
-            db_entities = self.session.execute(stmt).scalars().all()
+            matches = self.session.execute(stmt).scalars().all()
             
-            for db_ent in db_entities:
-                found_entities.append({"name": db_ent.entity_text, "type": db_ent.entity_type})
+            # Prioritize exact matches to reduce noise
+            exact_matches = [m for m in matches if m.entity_text.lower() == ent_text.lower()]
+            if exact_matches:
+                all_matches.extend(exact_matches)
+                logs.append(f"DEBUG: Exact match found for '{ent_text}' ({len(exact_matches)} instances).")
+            else:
+                # Fallback to top 3 shortest partial matches
+                matches.sort(key=lambda x: len(x.entity_text))
+                top_partial = matches[:3]
+                all_matches.extend(top_partial)
+                if top_partial:
+                    logs.append(f"DEBUG: Partial matches for '{ent_text}': {[e.entity_text for e in top_partial]}")
+            
+        if not all_matches:
+             return {"entities": [], "relationships": []}, logs
+
+        # Deduplicate matches by ID
+        unique_entities = {e.entity_id: e for e in all_matches}
+        target_entity_ids = list(unique_entities.keys())
+        
+        logs.append(f"DEBUG: Found {len(target_entity_ids)} matching entities in DB.")
+
+        # 2. Fetch all potential relationships (1-hop)
+        rel_stmt = select(Relationship).filter(
+            or_(
+                Relationship.source_entity_id.in_(target_entity_ids),
+                Relationship.target_entity_id.in_(target_entity_ids)
+            )
+        )
+        all_rels = self.session.execute(rel_stmt).scalars().all()
+        
+        # 3. Apply Relevance Filtering
+        direct_rels = []
+        expansion_rels = []
+        
+        # Track connectivity to find "Bridge Nodes" (2-hop connections)
+        neighbor_connectivity = defaultdict(set)
+        
+        for r in all_rels:
+            is_source_in = r.source_entity_id in unique_entities
+            is_target_in = r.target_entity_id in unique_entities
+            
+            if is_source_in and is_target_in:
+                direct_rels.append(r)
+            else:
+                expansion_rels.append(r)
+                # Identify the neighbor and which query entity it connects to
+                if is_source_in:
+                    neighbor_id = r.target_entity_id
+                    connected_query_id = r.source_entity_id
+                else:
+                    neighbor_id = r.source_entity_id
+                    connected_query_id = r.target_entity_id
                 
-                # Find relationships where this entity is Source or Target
-                rel_stmt = select(Relationship).filter(
-                    or_(
-                        Relationship.source_entity_id == db_ent.entity_id,
-                        Relationship.target_entity_id == db_ent.entity_id
-                    )
-                )
-                rels = self.session.execute(rel_stmt).scalars().all()
+                neighbor_connectivity[neighbor_id].add(connected_query_id)
+        
+        # Identify Bridge Nodes: Neighbors connected to > 1 distinct query entity
+        bridge_neighbor_ids = {
+            nid for nid, connected in neighbor_connectivity.items() 
+            if len(connected) > 1
+        }
+        
+        if bridge_neighbor_ids:
+            logs.append(f"DEBUG: Found {len(bridge_neighbor_ids)} bridge nodes connecting query entities.")
+
+        # --- Targeted Neighborhood Scanning ---
+        # Check if any query terms were missed in the initial DB lookup
+        found_texts = {e.entity_text.lower() for e in unique_entities.values()}
+        missing_terms = [q.lower() for q in query_entities if q.lower() not in found_texts]
+        
+        targeted_rels = []
+        if missing_terms and expansion_rels:
+            logs.append(f"DEBUG: Missing terms {missing_terms}. Scanning neighbors...")
+            
+            # Pre-fetch neighbor entities to check their text
+            neighbor_ids = set()
+            for r in expansion_rels:
+                if r.source_entity_id in unique_entities:
+                    neighbor_ids.add(r.target_entity_id)
+                else:
+                    neighbor_ids.add(r.source_entity_id)
+            
+            if neighbor_ids:
+                stmt_neighbors = select(Entity).filter(Entity.entity_id.in_(neighbor_ids))
+                neighbor_entities = self.session.execute(stmt_neighbors).scalars().all()
+                neighbor_map = {e.entity_id: e for e in neighbor_entities}
                 
-                for r in rels:
-                    found_relationships.append({
-                        "source_id": str(r.source_entity_id),
-                        "target_id": str(r.target_entity_id),
-                        "type": r.relationship_type
-                    })
-                    
-        return {"entities": found_entities, "relationships": found_relationships}, logs
+                for r in expansion_rels:
+                    nid = r.target_entity_id if r.source_entity_id in unique_entities else r.source_entity_id
+                    if nid in neighbor_map:
+                        n_text = neighbor_map[nid].entity_text.lower()
+                        # Fuzzy match: check if missing term is part of neighbor text
+                        if any(term in n_text for term in missing_terms):
+                            targeted_rels.append(r)
+                            unique_entities[nid] = neighbor_map[nid] # Optimization
+
+            if targeted_rels:
+                logs.append(f"DEBUG: Found {len(targeted_rels)} relationships connecting to missing terms.")
+                expansion_rels = [] # Found specific target, discard generic expansion
+            elif len(unique_entities) == 1 and not bridge_neighbor_ids:
+                logs.append("DEBUG: Missing terms not found in neighborhood. Pruning generic expansion.")
+                expansion_rels = [] # Avoid noise if we can't find the second entity
+
+        final_rels = list(direct_rels) + targeted_rels
+        
+        # Dynamic Expansion Limit: If we have strong signals (Direct or Bridge), reduce generic noise.
+        has_strong_signal = len(direct_rels) > 0 or len(bridge_neighbor_ids) > 0 or len(targeted_rels) > 0
+        MAX_EXPANSION = 2 if has_strong_signal else 5
+        
+        rels_by_entity = defaultdict(list)
+        for r in expansion_rels:
+            src_id = r.source_entity_id
+            tgt_id = r.target_entity_id
+            neighbor_id = tgt_id if src_id in unique_entities else src_id
+            
+            # Always include bridge relationships, otherwise subject to limit
+            if neighbor_id in bridge_neighbor_ids:
+                final_rels.append(r)
+            else:
+                anchor_id = src_id if src_id in unique_entities else tgt_id
+                rels_by_entity[anchor_id].append(r)
+        
+        for anchor_id, rels in rels_by_entity.items():
+            # Deprioritize 'RELATED_TO', then sort by confidence
+            rels.sort(key=lambda x: (x.relationship_type == 'RELATED_TO', -x.confidence_score))
+            final_rels.extend(rels[:MAX_EXPANSION])
+            
+        # 4. Format Output
+        formatted_rels = []
+        final_entity_ids = set(unique_entities.keys())
+        
+        for r in final_rels:
+            final_entity_ids.add(r.source_entity_id)
+            final_entity_ids.add(r.target_entity_id)
+            formatted_rels.append({
+                "source_id": str(r.source_entity_id),
+                "target_id": str(r.target_entity_id),
+                "type": r.relationship_type
+            })
+            
+        # Resolve names for all involved entities (including new neighbors)
+        missing_ids = final_entity_ids - set(unique_entities.keys())
+        if missing_ids:
+            stmt_missing = select(Entity).filter(Entity.entity_id.in_(missing_ids))
+            neighbor_entities = self.session.execute(stmt_missing).scalars().all()
+            for e in neighbor_entities:
+                unique_entities[e.entity_id] = e
+        
+        formatted_entities = [
+            {"name": e.entity_text, "type": e.entity_type} 
+            for eid, e in unique_entities.items() 
+            if eid in final_entity_ids
+        ]
+        
+        logs.append(f"DEBUG: KG Search returned {len(formatted_rels)} relationships (Direct: {len(direct_rels)}).")
+        return {"entities": formatted_entities, "relationships": formatted_rels}, logs
 
     def _log_query(self, text, q_type, chunks, graph, duration):
         """Saves query execution details to DB."""
