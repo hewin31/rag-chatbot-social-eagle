@@ -5,7 +5,7 @@ import os
 from typing import Dict, Any
 from sqlalchemy.orm import Session
 import spacy
-from sqlalchemy import select
+from sqlalchemy import select, delete
 
 # Import database utilities
 from .session import get_session
@@ -65,7 +65,7 @@ if "entity_ruler" not in nlp.pipe_names:
             patterns.append({"label": label, "pattern": [{"LOWER": term.lower()}]})
     ruler.add_patterns(patterns)
 
-def _normalize_entity_text(text: str, label: str) -> str:
+def _normalize_entity_text(text: str, label: str, lemma: str = "") -> str:
     """
     Normalizes entity text to reduce duplicates (e.g., 'Tax' -> 'tax').
     """
@@ -79,6 +79,9 @@ def _normalize_entity_text(text: str, label: str) -> str:
     }
     
     if label in concept_labels:
+        # Use lemma if available to canonicalize (e.g. "taxes" -> "tax")
+        if lemma:
+            return lemma.lower()
         return text.lower()
         
     # 2. For ORG, lowercase only if it's a generic term
@@ -106,7 +109,7 @@ def spacy_extract(text: str) -> Dict[str, Any]:
     
     for ent in doc.ents:
         if ent.label_ in valid_labels:
-            norm_name = _normalize_entity_text(ent.text, ent.label_)
+            norm_name = _normalize_entity_text(ent.text, ent.label_, ent.lemma_)
             ent_data = {"name": norm_name, "type": ent.label_}
             entities.append(ent_data)
             # Map every token in the entity span to the entity data
@@ -324,6 +327,11 @@ def extract_and_store_graph(chunk_id: uuid.UUID):
             return
 
         logger.info(f"Processing Chunk {chunk_id}...")
+
+        # Deduplication: Remove existing graph data for this chunk (Idempotency)
+        session.execute(delete(Relationship).where(Relationship.chunk_id == chunk_id))
+        session.execute(delete(Entity).where(Entity.chunk_id == chunk_id))
+        session.flush()
 
         # 2. Run spaCy Extraction
         graph_data = spacy_extract(chunk.chunk_text or "")

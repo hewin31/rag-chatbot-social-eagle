@@ -332,22 +332,45 @@ class RetrievalEngine:
                 rels_by_entity[anchor_id].append(r)
         
         for anchor_id, rels in rels_by_entity.items():
+            # Discard overly generic edges (RELATED_TO) for expansion nodes to reduce noise
+            filtered_rels = [r for r in rels if r.relationship_type != 'RELATED_TO']
+            
             # Deprioritize 'RELATED_TO', then sort by confidence
-            rels.sort(key=lambda x: (x.relationship_type == 'RELATED_TO', -x.confidence_score))
-            final_rels.extend(rels[:MAX_EXPANSION])
+            filtered_rels.sort(key=lambda x: (x.relationship_type == 'RELATED_TO', -x.confidence_score))
+            final_rels.extend(filtered_rels[:MAX_EXPANSION])
             
         # 4. Format Output
+        
+        # Canonicalization: Map multiple IDs to a single representative ID for (Name, Type)
+        canonical_map = {} # (name, type) -> canonical_id
+        id_to_canonical = {} # raw_id -> canonical_id
+        
+        # Build map from all unique entities found
+        for eid, e in unique_entities.items():
+            key = (e.entity_text, e.entity_type)
+            if key not in canonical_map:
+                canonical_map[key] = eid
+            id_to_canonical[eid] = canonical_map[key]
+
         formatted_rels = []
-        final_entity_ids = set(unique_entities.keys())
+        final_canonical_ids = set()
+        seen_edges = set()
         
         for r in final_rels:
-            final_entity_ids.add(r.source_entity_id)
-            final_entity_ids.add(r.target_entity_id)
-            formatted_rels.append({
-                "source_id": str(r.source_entity_id),
-                "target_id": str(r.target_entity_id),
-                "type": r.relationship_type
-            })
+            src_canon = id_to_canonical.get(r.source_entity_id)
+            tgt_canon = id_to_canonical.get(r.target_entity_id)
+            
+            if src_canon and tgt_canon and src_canon != tgt_canon:
+                edge_key = (src_canon, tgt_canon, r.relationship_type)
+                if edge_key not in seen_edges:
+                    final_canonical_ids.add(src_canon)
+                    final_canonical_ids.add(tgt_canon)
+                    formatted_rels.append({
+                        "source_id": str(src_canon),
+                        "target_id": str(tgt_canon),
+                        "type": r.relationship_type
+                    })
+                    seen_edges.add(edge_key)
             
         # Resolve names for all involved entities (including new neighbors)
         missing_ids = final_entity_ids - set(unique_entities.keys())
@@ -357,11 +380,16 @@ class RetrievalEngine:
             for e in neighbor_entities:
                 unique_entities[e.entity_id] = e
         
-        formatted_entities = [
-            {"name": e.entity_text, "type": e.entity_type} 
-            for eid, e in unique_entities.items() 
-            if eid in final_entity_ids
-        ]
+        formatted_entities = []
+        seen_entities = set()
+        for eid, e in unique_entities.items():
+            # Only include if this ID is the canonical one and it was used in the graph
+            if eid in final_canonical_ids and eid == id_to_canonical[eid]:
+                formatted_entities.append({
+                    "id": str(eid), # Provide the canonical ID
+                    "name": e.entity_text, 
+                    "type": e.entity_type
+                })
         
         logs.append(f"DEBUG: KG Search returned {len(formatted_rels)} relationships (Direct: {len(direct_rels)}).")
         return {"entities": formatted_entities, "relationships": formatted_rels}, logs

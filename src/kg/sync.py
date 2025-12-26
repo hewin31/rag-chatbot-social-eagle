@@ -1,6 +1,7 @@
 import os
 import logging
 import time
+import uuid
 from typing import List, Dict, Any
 from sqlalchemy import select
 from neo4j import GraphDatabase
@@ -42,6 +43,9 @@ class Neo4jSyncAgent:
         self.connect()
         pg_session = get_session()
         
+        # Generate a unique ID for this sync run to track active nodes
+        sync_run_id = str(uuid.uuid4())
+        
         try:
             # 1. Fetch Data from Postgres
             logger.info("Fetching data from PostgreSQL...")
@@ -50,14 +54,17 @@ class Neo4jSyncAgent:
             
             logger.info(f"Postgres State: {len(entities)} Entities, {len(relationships)} Relationships.")
 
+            # 1.5 Create Indexes
+            self._create_indexes()
+
             # 2. Sync Nodes
-            self._sync_nodes(entities)
+            self._sync_nodes(entities, sync_run_id)
             
             # 3. Sync Relationships
-            self._sync_relationships(relationships)
+            self._sync_relationships(relationships, entities, sync_run_id)
             
             # 4. Cleanup (Deletions)
-            self._prune_orphans(entities, relationships)
+            self._prune_orphans(sync_run_id)
             
             duration = int((time.time() - start_time) * 1000)
             logger.info(f"Sync completed in {duration}ms.")
@@ -69,23 +76,37 @@ class Neo4jSyncAgent:
             pg_session.close()
             self.close()
 
-    def _sync_nodes(self, entities: List[Entity]):
+    def _create_indexes(self):
+        """Create performance indexes in Neo4j."""
+        queries = [
+            # We remove the ID constraint because multiple Postgres IDs now map to one Neo4j node
+            "DROP CONSTRAINT FOR (n:Entity) REQUIRE n.id IS UNIQUE IF EXISTS",
+            "CREATE INDEX IF NOT EXISTS FOR (n:Entity) ON (n.name)",
+            "CREATE INDEX IF NOT EXISTS FOR (n:Entity) ON (n.type)"
+        ]
+        with self.driver.session() as session:
+            for q in queries:
+                try:
+                    session.run(q)
+                except Exception as e:
+                    logger.warning(f"Index operation failed (might be expected): {e}")
+        logger.info("Neo4j indexes verified.")
+
+    def _sync_nodes(self, entities: List[Entity], sync_id: str):
         """Upsert entities as Nodes."""
         if not entities:
             return
 
         query = """
         UNWIND $batch AS row
-        MERGE (n:Entity {id: row.id})
-        SET n.name = row.name,
-            n.type = row.type,
-            n.confidence = row.confidence,
-            n.source = 'postgres'
+        MERGE (n:Entity {name: row.name, type: row.type})
+        SET n.confidence = row.confidence,
+            n.source = 'postgres',
+            n.last_sync = $sync_id
         """
         
         batch_data = [
             {
-                "id": str(e.entity_id),
                 "name": e.entity_text,
                 "type": e.entity_type,
                 "confidence": e.confidence_score
@@ -94,24 +115,32 @@ class Neo4jSyncAgent:
         ]
         
         with self.driver.session() as session:
-            session.run(query, batch=batch_data)
+            session.run(query, batch=batch_data, sync_id=sync_id)
             logger.info(f"Upserted {len(batch_data)} nodes in Neo4j.")
 
-    def _sync_relationships(self, relationships: List[Relationship]):
+    def _sync_relationships(self, relationships: List[Relationship], entities: List[Entity], sync_id: str):
         """Upsert relationships as Edges."""
         if not relationships:
             return
+            
+        # Build lookup for Entity ID -> (Name, Type)
+        entity_lookup = {e.entity_id: (e.entity_text, e.entity_type) for e in entities}
 
         # Group by type to handle dynamic relationship types in Cypher
         grouped = {}
         for r in relationships:
+            src_info = entity_lookup.get(r.source_entity_id)
+            tgt_info = entity_lookup.get(r.target_entity_id)
+            
+            if not src_info or not tgt_info:
+                continue
+                
             r_type = self._sanitize_rel_type(r.relationship_type)
             if r_type not in grouped:
                 grouped[r_type] = []
             grouped[r_type].append({
-                "id": str(r.relationship_id),
-                "source": str(r.source_entity_id),
-                "target": str(r.target_entity_id),
+                "source_name": src_info[0], "source_type": src_info[1],
+                "target_name": tgt_info[0], "target_type": tgt_info[1],
                 "confidence": r.confidence_score
             })
 
@@ -121,41 +150,32 @@ class Neo4jSyncAgent:
                 # Dynamic Cypher construction for Relationship Type
                 query = f"""
                 UNWIND $batch AS row
-                MATCH (s:Entity {{id: row.source}})
-                MATCH (t:Entity {{id: row.target}})
-                MERGE (s)-[r:{r_type} {{id: row.id}}]->(t)
-                SET r.confidence = row.confidence
+                MATCH (s:Entity {{name: row.source_name, type: row.source_type}})
+                MATCH (t:Entity {{name: row.target_name, type: row.target_type}})
+                MERGE (s)-[r:{r_type}]->(t)
+                SET r.confidence = row.confidence,
+                    r.last_sync = $sync_id
                 """
-                session.run(query, batch=batch)
+                session.run(query, batch=batch, sync_id=sync_id)
                 count += len(batch)
             logger.info(f"Upserted {count} relationships in Neo4j.")
 
-    def _prune_orphans(self, entities: List[Entity], relationships: List[Relationship]):
-        """Remove Nodes/Edges in Neo4j that no longer exist in Postgres."""
-        valid_node_ids = [str(e.entity_id) for e in entities]
-        valid_rel_ids = [str(r.relationship_id) for r in relationships]
-        
+    def _prune_orphans(self, sync_id: str):
+        """Remove Nodes/Edges in Neo4j that were not updated in this sync run."""
         with self.driver.session() as session:
             # Prune Edges
-            if valid_rel_ids:
-                session.run("""
-                MATCH ()-[r]->()
-                WHERE NOT r.id IN $valid_ids
-                DELETE r
-                """, valid_ids=valid_rel_ids)
-            else:
-                # If no relationships in PG, delete all in Neo4j
-                session.run("MATCH ()-[r]->() DELETE r")
+            session.run("""
+            MATCH ()-[r]->()
+            WHERE r.last_sync <> $sync_id
+            DELETE r
+            """, sync_id=sync_id)
                 
             # Prune Nodes
-            if valid_node_ids:
-                session.run("""
-                MATCH (n:Entity)
-                WHERE NOT n.id IN $valid_ids
-                DETACH DELETE n
-                """, valid_ids=valid_node_ids)
-            else:
-                session.run("MATCH (n:Entity) DETACH DELETE n")
+            session.run("""
+            MATCH (n:Entity)
+            WHERE n.last_sync <> $sync_id
+            DETACH DELETE n
+            """, sync_id=sync_id)
                 
             logger.info("Pruning complete.")
 
