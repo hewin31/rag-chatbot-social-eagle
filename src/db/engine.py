@@ -56,7 +56,8 @@ class RetrievalEngine:
         
         # 3. KG Search (Relational Context)
         try:
-            kg_results = self._kg_search(query_text)
+            kg_results, kg_logs = self._kg_search(query_text)
+            debug_logs.extend(kg_logs)
         except Exception as e:
             debug_logs.append(f"ERROR: KG search failed: {e}")
             kg_results = {"entities": [], "relationships": []}
@@ -177,16 +178,29 @@ class RetrievalEngine:
             for c in chunks
         ], logs
 
-    def _kg_search(self, query: str) -> Dict[str, Any]:
+    def _kg_search(self, query: str) -> Tuple[Dict[str, Any], List[str]]:
         """
         Extracts entities from query and finds 1-hop neighbors in the graph.
         """
+        logs = []
         doc = self.nlp(query)
         # Extract entities from the user's question
         query_entities = [ent.text for ent in doc.ents]
         
+        # Fallback: If no named entities found, try to find important nouns
         if not query_entities:
-            return {"entities": [], "relationships": []}
+            # Filter for Nouns and Proper Nouns, excluding stop words and generic terms
+            ignored_terms = {"relationship", "link", "connection", "between", "what", "how"}
+            query_entities = [
+                token.text for token in doc 
+                if token.pos_ in ["NOUN", "PROPN"] and token.text.lower() not in ignored_terms
+            ]
+            logs.append(f"DEBUG: NER failed. Fallback to Nouns: {query_entities}")
+        else:
+            logs.append(f"DEBUG: KG Query Entities Found: {query_entities}")
+            
+        if not query_entities:
+            return {"entities": [], "relationships": []}, logs
             
         found_entities = []
         found_relationships = []
@@ -215,7 +229,7 @@ class RetrievalEngine:
                         "type": r.relationship_type
                     })
                     
-        return {"entities": found_entities, "relationships": found_relationships}
+        return {"entities": found_entities, "relationships": found_relationships}, logs
 
     def _log_query(self, text, q_type, chunks, graph, duration):
         """Saves query execution details to DB."""
@@ -237,8 +251,8 @@ class RetrievalEngine:
 if __name__ == "__main__":
     # Test the engine
     engine = RetrievalEngine()
-    result = engine.retrieve("What is the relationship between tax and income?"
-)
+    # Using a question with entities known to exist in the DB (e.g., 'Income Tax')
+    result = engine.retrieve("What is the relationship between Income Tax and India?")
     
     # Separate stats from the main result for cleaner printing
     stats = result.pop("execution_stats", None)
