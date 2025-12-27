@@ -76,9 +76,9 @@ python run_pipeline.py
 
 ## Test Outputs
 
-!1
-!2
-!3
-!4
+!(1.jpeg)
+!(2.jpeg)
+!(3.jpeg)
+!(4.jpeg)
 
 *(Note: Ensure your images inside the `test outputs` folder match these filenames, or update the links above.)*
