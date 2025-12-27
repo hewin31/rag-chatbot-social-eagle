@@ -76,7 +76,7 @@ python run_pipeline.py
 
 ## Test Outputs
 
-!(C:\Users\USER\Desktop\hewin\rag chatbot\test outputs\1.JPG)
+!(1.JPG)
 !(C:\Users\USER\Desktop\hewin\rag chatbot\test outputs\2.JPG)
 !(C:\Users\USER\Desktop\hewin\rag chatbot\test outputs\3.JPG)
 !(C:\Users\USER\Desktop\hewin\rag chatbot\test outputs\4.JPG)
