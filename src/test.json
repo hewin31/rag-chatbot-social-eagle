@@ -1,0 +1,157 @@
+{
+  "metadata": {
+    "document": "India Tax Highlights 2025 (Deloitte)",
+    "version": "v1.0",
+    "evaluation_focus": [
+      "retrieval",
+      "numeric_accuracy",
+      "temporal_reasoning",
+      "conditional_logic",
+      "hallucination_detection"
+    ]
+  },
+  "tests": [
+    {
+      "id": "F001",
+      "category": "fact_retrieval",
+      "question": "What is the standard corporate income tax rate for domestic companies under the regular taxation regime?",
+      "expected_answer": "30%",
+      "answer_type": "exact",
+      "expected_values": ["30%"],
+      "source_hint": "Corporate taxation – Rates – Regular taxation regime"
+    },
+    {
+      "id": "F002",
+      "category": "fact_retrieval",
+      "question": "What is the maximum effective tax rate for foreign companies including surcharge and cess?",
+      "expected_answer": "38.22%",
+      "answer_type": "exact",
+      "expected_values": ["38.22%"],
+      "source_hint": "Corporate taxation – Rates"
+    },
+    {
+      "id": "N001",
+      "category": "numeric_precision",
+      "question": "What is the combined cess rate applicable to taxes in India?",
+      "expected_answer": "4%",
+      "answer_type": "exact",
+      "expected_values": ["4%"],
+      "source_hint": "Corporate taxation – Surtax"
+    },
+    {
+      "id": "N002",
+      "category": "numeric_precision",
+      "question": "For how many years can Minimum Alternate Tax (MAT) credit be carried forward?",
+      "expected_answer": "15 years",
+      "answer_type": "exact",
+      "expected_values": ["15"],
+      "unit": "years",
+      "source_hint": "Alternative minimum tax"
+    },
+    {
+      "id": "C001",
+      "category": "conditional_logic",
+      "question": "Under what conditions can a domestic manufacturing company opt for a 15% corporate income tax rate?",
+      "expected_answer": "The company must be incorporated on or after 1 October 2019, commence manufacturing on or before 31 March 2024, and fulfill prescribed conditions while not claiming specified deductions.",
+      "answer_type": "descriptive",
+      "required_keywords": [
+        "incorporated on or after 1 October 2019",
+        "commence manufacturing on or before 31 March 2024",
+        "conditions",
+        "no specified deductions"
+      ],
+      "source_hint": "Concessional taxation regime"
+    },
+    {
+      "id": "C002",
+      "category": "conditional_logic",
+      "question": "When is a company considered resident in India for tax purposes?",
+      "expected_answer": "A company is resident if incorporated in India or if its place of effective management is in India.",
+      "answer_type": "descriptive",
+      "required_keywords": [
+        "incorporated in India",
+        "place of effective management"
+      ],
+      "source_hint": "Residence – Corporate taxation"
+    },
+    {
+      "id": "T001",
+      "category": "temporal_reasoning",
+      "question": "What is the long-term capital gains tax rate applicable as from 23 July 2024?",
+      "expected_answer": "12.5%",
+      "answer_type": "exact",
+      "expected_values": ["12.5%"],
+      "source_hint": "Capital gains – Position as from 23 July 2024"
+    },
+    {
+      "id": "T002",
+      "category": "temporal_reasoning",
+      "question": "What tax applied to share buybacks prior to 1 October 2024?",
+      "expected_answer": "A buyback tax of 20% plus surcharge and cess applied to domestic companies.",
+      "answer_type": "descriptive",
+      "required_keywords": [
+        "20%",
+        "buyback tax",
+        "prior to 1 October 2024"
+      ],
+      "source_hint": "Capital gains – Other"
+    },
+    {
+      "id": "X001",
+      "category": "cross_section_reasoning",
+      "question": "How are dividends taxed at the company level and the shareholder level in India?",
+      "expected_answer": "Dividends are not subject to dividend distribution tax at the company level and are taxed in the hands of shareholders.",
+      "answer_type": "descriptive",
+      "required_keywords": [
+        "no dividend distribution tax",
+        "taxed at shareholder level"
+      ],
+      "source_hint": "Taxation of dividends"
+    },
+    {
+      "id": "X002",
+      "category": "cross_section_reasoning",
+      "question": "How does GST treat exports compared to domestic supplies?",
+      "expected_answer": "Exports are zero-rated under GST, while domestic supplies are subject to applicable GST rates.",
+      "answer_type": "descriptive",
+      "required_keywords": [
+        "zero-rated",
+        "exports",
+        "domestic supplies"
+      ],
+      "source_hint": "Goods and Services Tax – Taxable transactions"
+    },
+    {
+      "id": "H001",
+      "category": "hallucination_check",
+      "question": "Does India impose a net wealth or net worth tax?",
+      "expected_answer": "No, India does not impose a net wealth or net worth tax.",
+      "answer_type": "boolean",
+      "expected_values": ["No"],
+      "source_hint": "Other taxes on corporations and individuals"
+    },
+    {
+      "id": "H002",
+      "category": "hallucination_check",
+      "question": "Does India currently implement Pillar Two global minimum tax rules?",
+      "expected_answer": "No, as of 1 January 2025, India has not announced implementation of Pillar Two rules.",
+      "answer_type": "boolean",
+      "expected_values": ["No"],
+      "source_hint": "Global minimum tax (Pillar Two)"
+    },
+    {
+      "id": "S001",
+      "category": "scenario_reasoning",
+      "question": "If an Indian resident sells listed shares held for 14 months after 23 July 2024, what tax rate applies?",
+      "expected_answer": "The gain qualifies as long-term capital gains and is taxed at 12.5% plus surcharge and cess.",
+      "answer_type": "descriptive",
+      "required_keywords": [
+        "long-term",
+        "12.5%",
+        "listed shares",
+        "12 months"
+      ],
+      "source_hint": "Capital gains – Position as from 23 July 2024"
+    }
+  ]
+}

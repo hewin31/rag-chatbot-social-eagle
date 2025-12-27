@@ -340,6 +340,19 @@ class RetrievalEngine:
             final_rels.extend(filtered_rels[:MAX_EXPANSION])
             
         # 4. Format Output
+
+        # Resolve names for all involved entities (including new neighbors)
+        final_raw_ids = set()
+        for r in final_rels:
+            final_raw_ids.add(r.source_entity_id)
+            final_raw_ids.add(r.target_entity_id)
+
+        missing_ids = final_raw_ids - set(unique_entities.keys())
+        if missing_ids:
+            stmt_missing = select(Entity).filter(Entity.entity_id.in_(missing_ids))
+            neighbor_entities = self.session.execute(stmt_missing).scalars().all()
+            for e in neighbor_entities:
+                unique_entities[e.entity_id] = e
         
         # Canonicalization: Map multiple IDs to a single representative ID for (Name, Type)
         canonical_map = {} # (name, type) -> canonical_id
@@ -372,14 +385,6 @@ class RetrievalEngine:
                     })
                     seen_edges.add(edge_key)
             
-        # Resolve names for all involved entities (including new neighbors)
-        missing_ids = final_entity_ids - set(unique_entities.keys())
-        if missing_ids:
-            stmt_missing = select(Entity).filter(Entity.entity_id.in_(missing_ids))
-            neighbor_entities = self.session.execute(stmt_missing).scalars().all()
-            for e in neighbor_entities:
-                unique_entities[e.entity_id] = e
-        
         formatted_entities = []
         seen_entities = set()
         for eid, e in unique_entities.items():
