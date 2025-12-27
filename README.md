@@ -81,3 +81,9 @@ python run_pipeline.py
 !(C:\Users\USER\Desktop\hewin\rag chatbot\test outputs\3.JPG)
 !(C:\Users\USER\Desktop\hewin\rag chatbot\test outputs\4.JPG)
 *(Note: Ensure your images inside the `test outputs` folder match these filenames, or update the links above.)*
+!Test Output 1
+!Test Output 2
+!Test Output 3
+!Test Output 4
+
+*(Note: Ensure your images inside the `test outputs` folder match these filenames.)*
